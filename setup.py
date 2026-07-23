@@ -36,6 +36,15 @@ setup(
     download_url     = 'https://github.com/gw-models/pyEFPEHM',
     python_requires  = '>=3.8',
     install_requires = ['numpy','scipy>=1.9.3','Cython'],
+    entry_points     = {
+        #summed [h_+, h_x] polarizations, for pycbc.waveform.get_fd_waveform/get_td_waveform
+        'pycbc.waveform.fd': ['pyEFPEHM = pyEFPEHM.waveform.plugins:pycbc_fd_plugin'],
+        'pycbc.waveform.td': ['pyEFPEHM = pyEFPEHM.waveform.plugins:pycbc_td_plugin'],
+        #un-summed (l, mp, n, m) modes, for pycbc.waveform.get_fd_waveform_modes/get_td_waveform_modes
+        #(requires a pycbc version with the fd_modes/td_modes plugin entry points, see plugin.py)
+        'pycbc.waveform.fd_modes': ['pyEFPEHM = pyEFPEHM.waveform.plugins:pycbc_fd_modes_plugin'],
+        'pycbc.waveform.td_modes': ['pyEFPEHM = pyEFPEHM.waveform.plugins:pycbc_td_modes_plugin'],
+    },
     classifiers      = [
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: Apache Software License',
