@@ -80,6 +80,10 @@ class pyEFPE:
 			Array containing [l, m] GW modes to take into account. Only 1PN modes are implemented ([[2,0],[2,1],[2,2],[3,0],[3,1],[3,2],[3,3],[4,0],[4,2],[4,4]])
 			Repeated modes and modes that are inconsistent with the pn_amplitude_order are removed.
 			If mode_array is None, choose all available GW modes.
+			IMPORTANT: m here is the co-precessing-frame multipolar index (called m in Eq.(3) of arXiv:2604.11903), not the inertial-frame
+			spin-weighted spherical-harmonic index m' (called mp in generate_hlm_modes/generate_tdomain_hlm_modes). For a non-precessing binary
+			the two coincide; for a precessing binary they generally do not, since a single co-precessing (l,m) mode "twists up" into
+			contributions at every inertial-frame m'=-l..l. harmonic_array's (l,m,n) triples use this same co-precessing m as their second entry.
 			- Default: [[2,0],[2,1],[2,2],[3,0],[3,1],[3,2],[3,3],[4,0],[4,2],[4,4]]
 
 		-----------  Matter effects parameters for waveform generation -----------
@@ -169,6 +173,9 @@ class pyEFPE:
 			Minimum accepted value of (f(t_SPA) - f)/f when solving for t_SPA - Default: 1e-12
 		SUA_kmax: int
 			Maximum order kmax to compute the constants a_{k,kmax} (Eq.(127-128) of arXiv:2106.10291) that appear in the Shifted Uniform Asymptotics (SUA) method. - Default: 1
+		Compute_hlm_Modes: bool
+			Choose whether or not to also set up the interpolants needed by generate_hlm_modes/generate_tdomain_hlm_modes (the raw, pre spherical-harmonic-projection multipole moments).
+			Only takes effect when Interpolate_Amplitudes=True; leave False if you never call those methods, to avoid the extra interpolation cost - Default: False
 		"""
 		#dictionary with default params
 		params = {'eccentricity': 0,
@@ -208,6 +215,7 @@ class pyEFPE:
 		          'Extra_interp_points_Nlm_p': 0,
 		          'SPA_Frequency_rtol': 1e-12,
 		          'SUA_kmax': 1,
+		          'Compute_hlm_Modes': False,
 		         }
 		
 		#validate the input parameters and merge them with the defaults (maps deprecated *_start keys, warns on typos / out-of-range values, raises on invalid masses or eccentricity)
@@ -654,18 +662,34 @@ class pyEFPE:
 
 		#Interpolate the precession amplitudes with m>=0, the ones with m<0 can be obtained from \mathsf{A}^{+,\times}_{l,-m} = (-1)^l conj(\mathsf{A}^{+,\times}_{l, m})
 		self.Apc_prec_interp, self.Apc_prec_cspline = [], []
+		#if the raw (pre spherical-harmonic-projection) hlm modes were requested, also prepare their interpolants
+		compute_hlm = self.params['Compute_hlm_Modes']
+		if compute_hlm: self.hlm_prec_cspline, self.hlm_prec_cspline_negm = [], []
 		unique_necessary_multipole_idxs = np.unique(self.necessary_multipole_idxs)
 		for im, mode in enumerate(self.mode_array):
-			
+
 			#if the mode is used, interpolate it for all available times. The time range for each could be taylored, taking into account SUA time-shifts.
 			if im in unique_necessary_multipole_idxs:
+				#compute raw twist-up Wigner-D matrix for this mode, D^l_{m'm}(t), shape (2l+1, Ntimes)
+				D_im = self.Wigner.D(*mode)
 				#compute precession amplitude for this mode
-				self.Apc_prec_interp.append(np.tensordot(self.Wigner.D(*mode), self.Apc_projs[im], axes=(0, 0)))
+				self.Apc_prec_interp.append(np.tensordot(D_im, self.Apc_projs[im], axes=(0, 0)))
 				#compute a cubic spline for this mode
 				self.Apc_prec_cspline.append(CubicSpline(self.prec_interp_ts, self.Apc_prec_interp[-1], axis=0))
+
+				#if requested, also interpolate the raw (pre-projection) hlm building block D^l_{m'm}(t) for this mode, m'=-l..l
+				if compute_hlm:
+					self.hlm_prec_cspline.append(CubicSpline(self.prec_interp_ts, np.transpose(D_im), axis=0))
+					#for m>0 modes we also need D^l_{m'(-m)}(t), which shows up for the negative eccentric harmonics n<0 (physically the -m co-precessing mode).
+					#Note this is NOT simply related to D^l_{m'm}(t) by conjugation (that shortcut only holds for the fully spherical-harmonic-projected Apc_prec above), so we interpolate it separately.
+					if mode[1]>0: self.hlm_prec_cspline_negm.append(CubicSpline(self.prec_interp_ts, np.transpose(self.Wigner.D(mode[0], -mode[1])), axis=0))
+					else        : self.hlm_prec_cspline_negm.append(None)
 			else:
 				self.Apc_prec_interp.append(None)
 				self.Apc_prec_cspline.append(None)
+				if compute_hlm:
+					self.hlm_prec_cspline.append(None)
+					self.hlm_prec_cspline_negm.append(None)
 
 	#function to compute Apc_prec for a given multipole index and time
 	def raw_Apc_prec_im(self, times, im, m_neg_idxs):
@@ -728,8 +752,54 @@ class pyEFPE:
 
 					#save the amplitudes of this mode in the main array
 					Apc_prec[im_idxs] = Apc_prec_im
-				
+
 		return Apc_prec
+
+	#function to compute the exact raw (pre spherical-harmonic-projection) hlm building block D^l_{m' m_signed}(t), m'=-l..l, for a given multipole index and (signed) m
+	def compute_hlm_prec_exact(self, times, im, m_signed):
+
+		#compute the Euler angles at the input times
+		phiz, zeta, costhL = self.compute_Euler_angles(times)
+
+		#update Wigner matrix computer with those angles
+		self.Wigner.update_angles(phiz, costhL, zeta)
+
+		#return the raw (un-projected) Wigner D-matrix at the input times, D^l_{m' m_signed}(t), shape (len(times), 2l+1)
+		return np.transpose(self.Wigner.D(self.mode_array[im,0], m_signed))
+
+	#function to compute the raw hlm building block for a given multipole index and time.
+	#Unlike raw_Apc_prec_im, we cannot use the \mathsf{A}^{+,\times}_{l,-m} = (-1)^l conj(\mathsf{A}^{+,\times}_{l, m}) shortcut here:
+	#that identity holds for the fully spherical-harmonic-projected amplitude, not for the raw D^l_{m'm}(t) building block
+	#(D^l_{m',-m}(t) is not simply related to D^l_{m',m}(t) by conjugation), so the -m case is interpolated/computed separately.
+	def raw_hlm_prec_im(self, times, im, m_neg_idxs):
+
+		l, m = self.mode_array[im]
+
+		#compute the amplitudes with interpolated or exact formulas
+		if self.params['Interpolate_Amplitudes']:
+			hlm_im = self.hlm_prec_cspline[im](times)
+			if len(m_neg_idxs)>0: hlm_im[m_neg_idxs] = self.hlm_prec_cspline_negm[im](times[m_neg_idxs])
+		else:
+			hlm_im = self.compute_hlm_prec_exact(times, im, m)
+			if len(m_neg_idxs)>0: hlm_im[m_neg_idxs] = self.compute_hlm_prec_exact(times[m_neg_idxs], im, -m)
+
+		return hlm_im
+
+	#function to compute the SUA'd raw hlm building block for a given multipole index (mirrors the per-mode SUA logic inside compute_Apc_prec, but for the raw, un-projected D^l_{m'm}(t) building block)
+	def SUA_hlm_prec_im(self, t_im, im, m_neg_idxs, T_SPA_im, SUA_kmax, ak_SUA):
+
+		#case without SUA
+		if SUA_kmax==0:
+			return self.raw_hlm_prec_im(t_im, im, m_neg_idxs)
+
+		#initialize amplitudes with value at central stencil point
+		hlm_im = ak_SUA[0]*self.raw_hlm_prec_im(t_im, im, m_neg_idxs)
+
+		#add the values at the other (symmetric) stencil points
+		for k_SUA in range(1, 1 + SUA_kmax):
+			hlm_im += ak_SUA[k_SUA]*(self.raw_hlm_prec_im(t_im + k_SUA*T_SPA_im, im, m_neg_idxs) + self.raw_hlm_prec_im(t_im - k_SUA*T_SPA_im, im, m_neg_idxs))
+
+		return hlm_im
 
 	#function to compute the exact Fourier Mode Amplitudes
 	def compute_Nlm_p_exact(self, times, interp_idxs):
@@ -1046,6 +1116,159 @@ class pyEFPE:
 		#return the result dictionary
 		return result
 
+	#function to compute the raw (l, m, n) multipole moments h_{l,m}(f) given an input array of frequencies, without applying the spherical-harmonic projection to polarizations
+	def generate_hlm_modes(self, freqs, return_waveform_pieces=False):
+		r"""
+		Compute the raw frequency-domain multipole moments h_{l,m}(f), before applying the spin-weighted spherical-harmonic projection to polarizations.
+
+		Requires the class to have been initialized with Compute_hlm_Modes=True.
+
+		Unlike generate_modes (which returns h_{+,x} for each co-precessing-frame (l, m, n) harmonic, already projected through this model's own fixed
+		viewing angles (Theta, Phi) = (theta_JN, phi_JN) derived from the `inclination`/`phase` parameters), this method returns the un-projected
+		complex multipole moments in the fixed (inertial, J-aligned) frame used internally by the precession solution.
+
+		CONVENTION (pyefpehm_native_fd): 'hlm' here is *not* claimed to equal any external (e.g. LAL/PyCBC) inertial-frame h_{lm}(f). What is proven --
+		analytically from the paper's Eq.(16) Fourier convention, and confirmed numerically (candidate comparison at multiple independent, non-degenerate
+		parameter points; relative L2 error ~1e-15, all other candidates tested wrong by O(1)) -- is only the self-consistent reconstruction contract
+		of this model's own polarizations. For a projector row Proj_{l,mp} = [Ap_{l,mp}, Ac_{l,mp}] built the same way as self.Apc_projs (see
+		interpolate_Apc_prec), evaluated at any desired fixed viewing angles (Theta, Phi) instead of this model's own (theta_JN, phi_JN):
+
+			[h_+, h_x](f) = sum_{mp=-l}^{l} hlm[mp](f) * conj(Proj_{l,mp}(Theta, Phi))
+
+		Note the complex conjugate on the projector. It is *not* itself proof that 'hlm' equals a conjugated external h_lm(f): the conjugate is
+		consistent with a Fourier-transform sign-convention difference between this paper's Eq.(16) (a +2*pi*i*f*t kernel) and the standard/LAL/PyCBC
+		convention (a -2*pi*i*f*t kernel) applied to the *real* h_+(t)/h_x(t) -- that step is only valid for a real time-domain signal, and does not
+		by itself establish the analogous relation for the individual complex-valued 'hlm' component. Establishing (or ruling out) equality with an
+		external h_lm(f) convention is a separate, not-yet-attempted task. Use reconstruct_polarizations_from_native_modes() to apply the formula
+		above rather than re-deriving it; do not apply a global conj() to 'hlm' on the assumption that it should "look like" another model's h_lm.
+		(generate_tdomain_hlm_modes has no such conjugate: h_+(t)/h_x(t) are built there as 2*Re(Amps*e^{-i phi}) directly, without an outer
+		conjugate -- see that method's docstring. Its 'hlm' is likewise only proven to satisfy its own, unconjugated, self-consistent contract.)
+
+		Because a single fixed inertial-frame index mp generally receives contributions from *all* co-precessing (l, m) multipoles of that l (this is
+		what precession "twist-up" means), and because the SPA/SUA machinery relies on each co-precessing (l, m, n) harmonic having a single well-defined
+		instantaneous frequency, results are keyed by the co-precessing (l, m, n) label exactly as in generate_modes, and for each such key we return the
+		raw contribution to *every* inertial-frame index mp=-l..l as a single array, rather than pre-summing over mp. Summing contributions that share the
+		same (l, mp) across different keys (i.e. across different co-precessing m and/or harmonics n) is left to the caller.
+
+		Parameters
+		----------
+		freqs : array-like
+			Sorted array of frequencies at which to evaluate the waveform.
+		return_waveform_pieces : bool, optional
+			If True, include intermediate quantities used to construct each mode. - Default: False
+
+		Returns
+		-------
+		result : dict
+			Dictionary with structure:
+
+			{
+			'freqs': freqs,  # Input array of frequencies
+			'modes': {
+				(l, m, n): { # co-precessing l, m, n values for this harmonic (same convention as generate_modes)
+				'freq_idxs': ndarray of int of shape (N_mode, )
+					Indices into `freqs` where this harmonic contributes.
+				'mp': ndarray of int of shape (2l+1,)
+					Inertial-frame indices mp=-l..l labelling the columns of 'hlm' below.
+				'hlm': ndarray of complex, shape (N_mode, 2l+1)
+					Contribution of this (l, m, n) harmonic to h_{l,mp}(f), for each mp in 'mp' (column j <-> mp[j]).
+				# Only if return_waveform_pieces=True:
+				't_SPA', 'T_SPA', 'psi_SPA'
+				},
+				}
+			}
+		"""
+		if not self.params['Compute_hlm_Modes']:
+			raise ValueError("generate_hlm_modes requires the class to be initialized with Compute_hlm_Modes=True")
+
+		#initialize dictionary to store the result. mode_convention='pyefpehm_native_fd' flags that 'hlm' satisfies only this model's own,
+		#self-consistent reconstruction contract (see docstring above) -- not proven to equal any external convention's h_lm(f)
+		result = {'freqs': freqs, 'mode_convention': 'pyefpehm_native_fd', 'modes': {}}
+
+		#first compute the SPA related things
+		f_idxs, interp_idxs, t_SPA, psi_SPA, T_SPA = self.stationary_times(freqs, rtol=self.params['SPA_Frequency_rtol'])
+
+		#handle the case where there are no stationary times
+		if len(f_idxs)==0: return result
+
+		#compute SPA factor = T*exp(1j*\psi) (Eq.(46c) of 1801.08542)
+		SPA_fact = T_SPA*(np.cos(psi_SPA) + 1j*np.sin(psi_SPA))
+
+		#compute the Fourier mode amplitudes. We do not SUA these, since from Eqs.(18,19,34) of 1408.5158 they are a 1.5PN correction, while Wigner-SUA is 0.5PN (mirrors SUA_Amplitudes)
+		Nlm_p = self.compute_Nlm_p(t_SPA, interp_idxs)
+
+		#compute the points for which the stencil points are in range and therefore we can do SUA (mirrors SUA_Amplitudes)
+		iSUA = ((t_SPA - self.params['SUA_kmax']*T_SPA) >= self.sol.all_ts[0]) & ((t_SPA + self.params['SUA_kmax']*T_SPA) <= self.sol.all_ts[-1])
+
+		#extract the modes being requested
+		multipole_idxs = self.necessary_multipole_idxs[interp_idxs]
+		ps_all = self.necessary_ps[interp_idxs]
+		p_neg_all = (ps_all < 0)
+
+		#group by multipole_idxs
+		grouped_im_idxs = my_cgroup_idxs_by_vals(multipole_idxs)
+
+		#loop over (l,m) co-precessing modes
+		for im, im_idxs in enumerate(grouped_im_idxs):
+
+			#if there are no indexes for this mode, skip it
+			if len(im_idxs)==0: continue
+
+			#extract l and m
+			l, m = self.mode_array[im]
+
+			#compute the raw (un-projected) hlm building block, SUA'd where applicable
+			t_im = t_SPA[im_idxs]
+			m_neg_im = p_neg_all[im_idxs]
+			iSUA_im = iSUA[im_idxs]
+			hlm_im = np.zeros((len(im_idxs), 2*l+1), dtype=np.complex128)
+
+			idxs_noSUA = np.nonzero(~iSUA_im)[0]
+			if len(idxs_noSUA)>0:
+				hlm_im[idxs_noSUA] = self.SUA_hlm_prec_im(t_im[idxs_noSUA], im, np.nonzero(m_neg_im[idxs_noSUA])[0], None, 0, None)
+
+			idxs_SUA = np.nonzero(iSUA_im)[0]
+			if len(idxs_SUA)>0:
+				hlm_im[idxs_SUA] = self.SUA_hlm_prec_im(t_im[idxs_SUA], im, np.nonzero(m_neg_im[idxs_SUA])[0], T_SPA[im_idxs][idxs_SUA], self.params['SUA_kmax'], self.ak_SUA)
+
+			#multiply by the Fourier mode amplitude and SPA factor, then by the overall prefactor, conjugating to use the standard Fourier transform definition (mirrors generate_modes)
+			waveform_ts_im = (((2*np.pi)**0.5)*self.h0_pref)*np.conj(SPA_fact[im_idxs,np.newaxis]*hlm_im*Nlm_p[im_idxs,np.newaxis])
+
+			#compute the ps corresponding to this mode
+			ps = ps_all[im_idxs]
+
+			#minimum value of p
+			pmin = np.amin(ps)
+
+			#divide also by the value of p
+			grouped_ip_idxs = my_cgroup_idxs_by_vals(ps - pmin)
+
+			#loop over p modes
+			for ip, p_idxs in enumerate(grouped_ip_idxs):
+
+				#if there are no indexes for this mode, skip it
+				if len(p_idxs)==0: continue
+
+				#reconstruct p
+				p = ip + pmin
+
+				#define label for this mode
+				if p<0: mode_label = (l, -m, -p)
+				else:   mode_label = (l,  m,  p)
+
+				#Compute indexes of this mode
+				imp_idxs = im_idxs[p_idxs]
+
+				#store (sorted) frequency indices, inertial mp labels, and raw hlm values corresponding to this mode in result dictionary
+				result['modes'][mode_label] = {'freq_idxs': f_idxs[imp_idxs], 'mp': np.arange(-l, l+1), 'hlm': waveform_ts_im[p_idxs]}
+
+				#If required, store extra waveform pieces in dictionary
+				if return_waveform_pieces:
+					result['modes'][mode_label].update({'t_SPA': t_SPA[imp_idxs], 'T_SPA': T_SPA[imp_idxs], 'psi_SPA': psi_SPA[imp_idxs]})
+
+		#return the result dictionary
+		return result
+
 	#method that returns start time of the waveform
 	def return_start_time(self,):
 		return self.sol.all_ts[0]
@@ -1317,4 +1540,278 @@ class pyEFPE:
 
 		#return result dictionary
 		return result
+
+	#Function to compute the time-domain raw (l, m, n) multipole moments h_{l,m}(t) given an input array of times (or a time spacing), without applying the spherical-harmonic projection to polarizations
+	def generate_tdomain_hlm_modes(self, times=None, delta_t=None, return_waveform_pieces=False):
+		r"""
+		Compute the raw time-domain multipole moments h_{l,m}(t), before applying the spin-weighted spherical-harmonic projection to polarizations.
+
+		Requires the class to have been initialized with Compute_hlm_Modes=True.
+
+		See generate_hlm_modes for the conventions used and important caveats (results are keyed by the co-precessing (l, m, n) label, and for each such
+		key the raw contribution to *every* inertial-frame index mp=-l..l is returned as a single array; summing contributions that share the same
+		(l, mp) across different keys is left to the caller).
+
+		Reconstruction (note: unlike generate_hlm_modes, there is NO conjugate on the projector here, since h(t) is built as 2*Re(Amps*e^{-i phi})
+		directly, without an outer conjugate -- see generate_tdomain_waveform):
+
+			[h_+, h_x](t) = sum_{mp=-l}^{l} hlm[mp](t) * Proj_{l,mp}(Theta, Phi)   (real part only; hlm already has the factor of 2 from 2*Re(...) built in)
+
+		where Proj is built the same way as self.Apc_projs (see interpolate_Apc_prec) but at any desired fixed viewing angles.
+
+		CONVENTION (pyefpehm_native_td -- note this is a *different* convention label from generate_hlm_modes' pyefpehm_native_fd; the FD and TD
+		reconstruction contracts must not be mixed, e.g. do not apply the FD conj() here or vice versa): this 'hlm' is *not* claimed to equal any
+		external (e.g. LAL/PyCBC) inertial-frame h_{lm}(t). What is proven -- confirmed numerically at multiple independent, non-degenerate
+		parameter points -- is only the self-consistent reconstruction contract above, i.e. that it reproduces this model's own h_+(t), h_x(t)
+		(as returned by generate_tdomain_waveform/generate_tdomain_modes) via the *un-conjugated* projector. Establishing (or ruling out) equality
+		with an external h_lm(t) convention is a separate, not-yet-attempted task. Use reconstruct_polarizations_from_native_modes() to apply the
+		formula above rather than re-deriving it.
+
+		Parameters
+		----------
+		times : array-like, optional
+			Sorted array of times at which to evaluate the waveform.
+			If None, a uniform grid is generated using `delta_t`. - Default: None
+		delta_t : float, optional
+			Time step used to generate a uniform time array if `times` is None. - Default: None
+		return_waveform_pieces : bool, optional
+			If True, include intermediate quantities used to construct each mode. - Default: False
+
+		Returns
+		-------
+		result : dict
+			Dictionary with structure:
+
+		{
+		'times': times, # Input array of times (or array constructed from delta_t)
+		'modes': {
+			(l, m, n): { # co-precessing l, m, n values for this harmonic (same convention as generate_tdomain_modes)
+			'time_idxs': ndarray of int of shape (N_mode, )
+				Indices into `times` where this harmonic contributes.
+			'mp': ndarray of int of shape (2l+1,)
+				Inertial-frame indices mp=-l..l labelling the columns of 'hlm' below.
+			'hlm': ndarray of complex, shape (N_mode, 2l+1)
+				Contribution of this (l, m, n) harmonic to h_{l,mp}(t), for each mp in 'mp' (column j <-> mp[j]).
+			# Only if return_waveform_pieces=True:
+			'Nlm_p', 'phase', 'omega', 'DomegaDt'
+			},
+			}
+		}
+
+		Raises
+		------
+		ValueError
+			If neither `times` nor `delta_t` is provided.
+		"""
+		if not self.params['Compute_hlm_Modes']:
+			raise ValueError("generate_tdomain_hlm_modes requires the class to be initialized with Compute_hlm_Modes=True")
+
+		#if no time-array is given, create it
+		if times is None:
+			if delta_t is None: raise ValueError("To compute time-domain waveform, please give either an array of times or a time spacing delta_t")
+			#make an equally spaced array for all available times
+			times = np.arange(self.sol.all_ts[0], self.sol.all_ts[-1], delta_t)
+			#by construction, all times are valid
+			i_valid = np.arange(len(times))
+			valid_times = times
+		else:
+			#make sure it is a numpy array
+			times = np.asarray(times)
+			#find valid times (i.e. where the system has been simulated)
+			i_valid = np.nonzero((times>=self.sol.all_ts[0]) & (times<=self.sol.all_ts[-1]))[0]
+			valid_times = times[i_valid]
+
+		#initialize dictionary to store the result. mode_convention='pyefpehm_native_td' flags that 'hlm' satisfies only this model's own,
+		#self-consistent time-domain reconstruction contract (see docstring above) -- not proven to equal any external convention's h_lm(t).
+		#Note this is a *different* label from generate_hlm_modes' pyefpehm_native_fd; the two conventions must not be mixed.
+		result = {'times': times, 'mode_convention': 'pyefpehm_native_td', 'modes': {}}
+
+		#find the values of interp_idxs for each time
+		t_idxs, interp_idxs = sorted_vals_in_intervals(valid_times, self.sol.all_ts[self.mode_interp_idx], self.sol.all_ts[self.mode_interp_idx+1])
+
+		#compute \lambda and \delta\lambda at the valid times
+		valid_l, valid_dl = self.sol(valid_times, derivative=0, idxs=[2,3])
+
+		#if required, compute also the first and second derivatives of the phase
+		if return_waveform_pieces:
+			valid_DlDt  , valid_DdlDt   = self.sol(valid_times, derivative=1, idxs=[2,3])
+			valid_DDlDt2, valid_DDdlDt2 = self.sol(valid_times, derivative=2, idxs=[2,3])
+
+		#group by multipole_idxs
+		multipole_idxs = self.necessary_multipole_idxs[interp_idxs]
+		grouped_im_idxs = my_cgroup_idxs_by_vals(multipole_idxs)
+
+		#loop over (l,m) co-precessing modes
+		for im, im_idxs in enumerate(grouped_im_idxs):
+
+			#if there are no indexes for this mode, skip it
+			if len(im_idxs)==0: continue
+
+			#extract l and m
+			l, m = self.mode_array[im]
+
+			#compute the interp_idxs, ps and time_idxs corresponding to this mode
+			interp_idxs_im = interp_idxs[im_idxs]
+			ps = self.necessary_ps[interp_idxs_im]
+			t_idxs_im = t_idxs[im_idxs]
+
+			#compute the minimum and maximum time indexes for this mode
+			t_idxs_im_min = np.amin(t_idxs_im)
+			t_idxs_im_max = np.amax(t_idxs_im)
+
+			#compute the raw (un-projected) hlm building blocks for this mode in [tmin, tmax]. Unlike raw_Apc_prec_im, there is no cheap conjugate
+			#shortcut between the +m and -m building blocks (that shortcut only holds for the fully spherical-harmonic-projected Apc_prec), so we
+			#need both variants (the -m one is only needed, and only exists, for m>0 modes; for m==0, ps>=0 always so it is never used)
+			times_im_range = valid_times[t_idxs_im_min:(t_idxs_im_max+1)]
+			hlm_im_pos = self.raw_hlm_prec_im(times_im_range, im, np.array([], dtype=int))
+			if m>0: hlm_im_neg = self.raw_hlm_prec_im(times_im_range, im, np.arange(len(times_im_range)))
+			else  : hlm_im_neg = hlm_im_pos
+
+			#minimum value of p
+			pmin = np.amin(ps)
+
+			#divide also by the value of p
+			grouped_ip_idxs = my_cgroup_idxs_by_vals(ps - pmin)
+
+			#loop over p modes
+			for ip, p_idxs in enumerate(grouped_ip_idxs):
+
+				#if there are no indexes for this mode, skip it
+				if len(p_idxs)==0: continue
+
+				#reconstruct p
+				p = ip + pmin
+
+				#Compute the (sorted) times corresponding to this mode
+				t_idxs_ip = t_idxs_im[p_idxs]
+
+				#Compute the raw hlm building block corresponding to this mode (select the +m or -m variant depending on the sign of p)
+				hlm_ip = (hlm_im_neg if p<0 else hlm_im_pos)[t_idxs_ip-t_idxs_im_min]
+
+				#compute the phase of this mode = p\lambda + (m - p)\delta\lambda
+				phi_t = p*valid_l[t_idxs_ip] + (m - p)*valid_dl[t_idxs_ip]
+
+				#handle when p is negative
+				if p<0:
+
+					#make sure the phase is positive doing [p,m]->[-p,-m]
+					phi_t = -phi_t
+
+					#define label for this mode
+					mode_label = (l, -m, -p)
+				else:
+					mode_label = (l,  m,  p)
+
+				#compute Fourier mode amplitudes for this mode
+				Nlm_p = self.compute_Nlm_p(valid_times[t_idxs_ip], interp_idxs_im[p_idxs])
+
+				#compute the raw complex hlm(t), mirroring the h(t)=2 h0_pref Re(A(t) e^{-i phi(t)}) construction of generate_tdomain_modes, but without collapsing to the real part
+				hlm_t = (2*self.h0_pref)*hlm_ip*Nlm_p[:,None]*(np.cos(phi_t) - 1j*np.sin(phi_t))[:,None]
+
+				#store (sorted) time indices, inertial mp labels, and raw hlm values corresponding to this mode in result dictionary
+				result['modes'][mode_label] = {'time_idxs': i_valid[t_idxs_ip], 'mp': np.arange(-l, l+1), 'hlm': hlm_t}
+
+				#If required, store extra waveform pieces in dictionary
+				if return_waveform_pieces:
+					#compute the first and second derivatives of the phase
+					omega    = p*valid_DlDt[t_idxs_ip]   + (m - p)*valid_DdlDt[t_idxs_ip]
+					DomegaDt = p*valid_DDlDt2[t_idxs_ip] + (m - p)*valid_DDdlDt2[t_idxs_ip]
+					#handle when p is negative, doing [p,m]->[-p,-m]
+					if p<0: omega, DomegaDt = -omega, -DomegaDt
+					#add stuff to dictionary that will be returned
+					result['modes'][mode_label].update({'Nlm_p': Nlm_p, 'phase': phi_t, 'omega': omega, 'DomegaDt': DomegaDt})
+
+		#return result dictionary
+		return result
+
+	#function to reconstruct [h_+, h_x] from the dict returned by generate_hlm_modes/generate_tdomain_hlm_modes,
+	#applying the pyefpehm_native_fd/pyefpehm_native_td reconstruction contract documented in those methods
+	#(they are DIFFERENT, non-interchangeable conventions -- see their docstrings), so callers do not need
+	#to re-derive (or guess) the conj()/no-conj split themselves
+	def reconstruct_polarizations_from_native_modes(self, result, Theta=None, Phi=None):
+		r"""
+		Reconstruct [h_+, h_x] from the dict returned by generate_hlm_modes(freqs, ...) or
+		generate_tdomain_hlm_modes(times, ...), applying the documented pyefpehm_native_fd /
+		pyefpehm_native_td reconstruction contract (see those methods' docstrings for the exact
+		formula and what has and has not been proven about each convention -- they are different
+		and must not be mixed, e.g. by passing a frequency-domain 'result' but expecting the
+		time-domain, un-conjugated formula to apply, or vice versa).
+
+		Parameters
+		----------
+		result : dict
+			Output of generate_hlm_modes or generate_tdomain_hlm_modes (distinguished by the
+			presence of a 'freqs' vs 'times' key). Must carry the 'mode_convention' key that both
+			of those methods populate ('pyefpehm_native_fd' or 'pyefpehm_native_td' respectively);
+			a mismatched or missing value raises ValueError rather than silently applying the wrong
+			domain's formula.
+		Theta, Phi : float, optional
+			Fixed viewing angles (radians) at which to project the modes.
+			Default: this model's own (theta_JN, phi_JN), i.e. the same angles
+			generate_waveform/generate_tdomain_waveform use internally (derived from the
+			`inclination`/`phase` parameters) - Default: None (uses this model's own angles)
+
+		Returns
+		-------
+		waveform : ndarray of shape (2, N)
+			[h_+, h_x]. Complex (frequency domain) if `result` came from generate_hlm_modes, real
+			(time domain) if it came from generate_tdomain_hlm_modes - matching the return
+			convention of generate_waveform/generate_tdomain_waveform respectively.
+
+		Raises
+		------
+		ValueError
+			If `result` carries neither a 'freqs' nor a 'times' key, or if its 'mode_convention'
+			does not match the domain implied by which of those two keys is present.
+		"""
+		is_fd = 'freqs' in result
+		is_td = 'times' in result
+		if not (is_fd or is_td):
+			raise ValueError("result must be the output of generate_hlm_modes (has a 'freqs' key) "
+			                 "or generate_tdomain_hlm_modes (has a 'times' key); got neither.")
+		expected_convention = 'pyefpehm_native_fd' if is_fd else 'pyefpehm_native_td'
+		if result.get('mode_convention') != expected_convention:
+			raise ValueError("result['mode_convention']=%r does not match the expected %r for this "
+			                 "domain (%s); the frequency- and time-domain native reconstruction "
+			                 "contracts are different and must not be mixed."
+			                 % (result.get('mode_convention'), expected_convention, 'FD' if is_fd else 'TD'))
+
+		n_out = len(result['freqs']) if is_fd else len(result['times'])
+		idx_key = 'freq_idxs' if is_fd else 'time_idxs'
+
+		#default to this model's own fixed viewing angles
+		if Theta is None: Theta = np.arccos(self.cos_theta_JN)
+		if Phi is None: Phi = self.phi_JN
+
+		#build the [Ap,Ac] projector at the requested viewing angles for every l present, mirroring
+		#interpolate_Apc_prec's construction of self.Apc_projs. The projector only depends on the
+		#*parity* of the co-precessing m (not its sign, since (-1)**(-m)==(-1)**m), so it is keyed
+		#here by (l, abs(m)) and is valid for both the m>=0 and (post relabeling) m<0 mode labels
+		#that appear in `result['modes']`
+		l_array = np.unique(self.mode_array[:,0])
+		m2_Ylmp = compute_m2_Ylm(np.cos(Theta), Phi, l_array=l_array)
+		m2_Ylmp = {l: m2_Ylmp[il] for il, l in enumerate(l_array)}
+		Apc_projs_req = {}
+		for l, m in self.mode_array:
+			m2_Ylmp_mod = np.conj(m2_Ylmp[l][::-1])
+			if (m%2)==0: m2_Ylmp_mod[1::2] = -m2_Ylmp_mod[1::2]
+			else       : m2_Ylmp_mod[::2]  = -m2_Ylmp_mod[::2]
+			Ap_proj =   0.5*(m2_Ylmp[l] + m2_Ylmp_mod)
+			Ac_proj = -0.5j*(m2_Ylmp[l] - m2_Ylmp_mod)
+			Apc_projs_req[(l, m)] = np.transpose([Ap_proj, Ac_proj])
+
+		#accumulate each (l, m, n) harmonic's contribution to [h_+, h_x]
+		waveform = np.zeros((n_out, 2), dtype=(np.complex128 if is_fd else float))
+		for (l, m, n), mode in result['modes'].items():
+			Proj = Apc_projs_req[(l, abs(m))]
+			#frequency domain needs the *projector* conjugated before contracting with hlm (NOT the other
+			#way around: hlm is complex, so conj(hlm*Proj) != hlm*conj(Proj) -- see generate_hlm_modes
+			#docstring for why conj(Proj) is the correct one); time domain uses Proj unconjugated, then
+			#takes the real part (see generate_tdomain_hlm_modes docstring)
+			Proj_used = np.conj(Proj) if is_fd else Proj
+			contrib = np.tensordot(mode['hlm'], Proj_used, axes=(1, 0)) #shape (N_mode, 2)
+			if not is_fd: contrib = contrib.real
+			np.add.at(waveform, mode[idx_key], contrib)
+
+		return np.transpose(waveform)
 
