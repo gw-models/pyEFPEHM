@@ -19,13 +19,18 @@ from pyEFPEHM.utils.cython_utils import my_cpoly
 def initial_conditions_for_RR_eqs(f0_orb, fref_orb, ff_orb, e_ref, m1, m2, spin1_ref, spin2_ref, inclination, phi_ref, phi_e_ref, DJ2_tol=1e-10, DJ2_max_iter=10, pn_spin_order=6):
 
 	r'''
-	Function to compute initial conditions and initialize our waveform. We try to follow the conventions of LAL.
-	https://lscsoft.docs.ligo.org/lalsuite/lalsimulation/group__lalsimulation__inspiral.html
-	The direction of observation N is on the z axis, and the orbital angular momentum is on the x-z plane. 
-	The inclination is the angle between L and N. 
-	The spins are in a frame such that sz_i = dot(s0_i, L).
-	The spin components in the N-aligned-frame are the result of doing a rotation R_y(inclination) of the input spins.
-	NOTE that in LAL the spin components transverse to the orbital angular momentum are in a triad in which the x-axis is parallel to the vector pointing from body 1 to body 2. This is a bit difficult for eccentric orbits -.-
+	Function to compute initial conditions and initialize our waveform. We follow the conventions of LAL.
+	https://lscsoft.docs.ligo.org/lalsuite/7.26/lalsimulation/group__lalsimulation__inspiral.html
+	Everything is done in the LAL source frame S at the reference frequency: the z axis is along the Newtonian orbital
+	angular momentum L, and the x axis is along the unit vector \hat{n} pointing from body 2 to body 1 (for eccentric
+	orbits we take \hat{n} at the *mean* orbital phase, i.e. \lambda(t_ref) is measured from it).
+	The input spins are the components in this frame, so aligned spins have spin1x=spin1y=spin2x=spin2y=0.
+	The inclination is the angle between L and the direction of observation N, whose components in S are
+	N = (sin(inclination)*cos(pi/2 - phi_ref), sin(inclination)*sin(pi/2 - phi_ref), cos(inclination)),
+	i.e. phi_ref is the LAL reference phase (the angle on the orbital plane from the ascending node to body 1).
+	This gives the LAL polarizations h_+ - i h_x = sum_{lm} h_{lm} {}_{-2}Y_{lm}(inclination, pi/2 - phi_ref).
+	Internally the waveform is computed in the J frame (z along the total angular momentum J, L on the x-z plane),
+	which is where the returned (cos_theta_JN, sin_theta_JN, phi_JN) are expressed.
 	--------------------------------------------------
 	
 	f0_orb: float
@@ -42,15 +47,16 @@ def initial_conditions_for_RR_eqs(f0_orb, fref_orb, ff_orb, e_ref, m1, m2, spin1
 	m2: float
 	    secondary mass, assumed units are [1/f]. If m2>m1, all properties of the components will be flip
 	spin1_ref: numpy array, shape (3,)
-	    reference dimensionless spin vector spin1=S1/mu1^2=s1/mu1 of the primary object in cartesian coordinates
+	    reference dimensionless spin vector spin1=S1/mu1^2=s1/mu1 of the primary object, cartesian components in the LAL source frame defined above
 	spin2_ref: numpy array, shape (3,)
-	    dimensionless spin vector spin2=S2/mu2^2=s2/mu2 of the secondary object in cartesian coordinates
+	    dimensionless spin vector spin2=S2/mu2^2=s2/mu2 of the secondary object, cartesian components in the LAL source frame defined above
 	phi_ref: float
-	    reference orbital phase
+	    LAL reference phase phiRef, i.e. the (mean) orbital phase measured from the ascending node
 	phi_e_ref: float
 	    reference mean anomaly \ell_0 of quasi keplerian parametrization
 	inclination : float
-		Angle between orbital angular momentum and vector from binary to observer (N).
+		Angle between orbital angular momentum and vector from binary to observer (N), in [0, pi].
+		Other values are folded with (inclination, phi_ref) -> (-inclination, phi_ref - pi), which leaves N unchanged.
 
 	'''
 	
@@ -102,12 +108,6 @@ def initial_conditions_for_RR_eqs(f0_orb, fref_orb, ff_orb, e_ref, m1, m2, spin1
 		warnings.warn("Reference orbital frequency fref_orb=%.3e is at or beyond the end of the evolution, clamping the reference point to y=yf=%.3f (orbital frequency %.3e)"%(fref_orb, yf, fref_orb_eff), UserWarning, stacklevel=2)
 		y_ref = yf
 
-	#compute reference \lambda
-	l0 = phi_ref
-
-	#compute reference \delta\lambda from above Eq.(17a) of 1801.08542
-	dl0 = phi_ref - phi_e_ref
-
 	#compute the reduced spins as defined in Eq.(7). Note that S = mu^2 spin
 	s0_1, s0_2 = mu1*spin1_ref, mu2*spin2_ref
 	
@@ -126,26 +126,13 @@ def initial_conditions_for_RR_eqs(f0_orb, fref_orb, ff_orb, e_ref, m1, m2, spin1
 	#compute initial \delta\chi from Eq.(11)
 	dchi0 = sz_1 - sz_2
 
-	#compute rotation matrix that moves the input spins to the physical frame, this is just of R_y(inclination), which would move z to L
-	cinc, sinc = np.cos(inclination), np.sin(inclination)
-	R_spin = np.array([[ cinc,   0, sinc],
-	                   [    0,   1,    0],
-	                   [-sinc,   0, cinc]])
-	
-	#compute the rotated spins
-	s0_1_rot = np.dot(R_spin, s0_1)
-	s0_2_rot = np.dot(R_spin, s0_2)
-
-	#compute the initial Newtonian Angular Momentum, Eq.(8)
-	lN_vec = np.array([sinc, 0, cinc])
-
 	############################## Initialize MSA ############################
 
 	#compute initial guess of DJ20
 	DJ20 = 2*(s0_1[0]*s0_2[0] + s0_1[1]*s0_2[1])
 
-	#compute V as introduced in Eq.(138)
-	Vol = np.dot(np.cross(lN_vec, s0_1_rot), s0_2_rot)
+	#compute V as introduced in Eq.(138), the z component of the cross product of the perpendicular spins (L is the z axis of the source frame)
+	Vol = s0_1[0]*s0_2[1] - s0_1[1]*s0_2[0]
 	
 	#initialize MSA class
 	MSA = MultipleScaleAnalysis(m1, m2, sz_1, sz_2, sp2_1, sp2_2, pn_spin_order=pn_spin_order)
@@ -194,40 +181,77 @@ def initial_conditions_for_RR_eqs(f0_orb, fref_orb, ff_orb, e_ref, m1, m2, spin1
 	zeta00 = -dzeta0
 
 	#############################################################################################################
-	
-	#compute total angular momentum vector in physical frame
-	J_vec = MSA.aJ*lN_vec + MSA.bJ*(s0_1_rot + s0_2_rot) + MSA.cJ*(s0_1_rot - s0_2_rot)
 
-	#compute rotation matrix that moves J to z axis
-	sthJ, cthJ, sphJ, cphJ = spherical_coords_from_vec(J_vec, return_trigonometric=True)
-	R_J_to_z = np.array([[cthJ*cphJ, cthJ*sphJ, -sthJ],
-	                     [    -sphJ,      cphJ,     0],
-	                     [sthJ*cphJ, sthJ*sphJ,  cthJ]])
-	
-	#compute orbital angular momentum in this frame
-	lN_vec_J_aligned = np.dot(R_J_to_z, lN_vec)
-	
-	#compute rotation matrix that moves this rotated L vector to the x-z plane, and thus to the J-frame
-	sthLJ, cthLJ, sphLJ, cphLJ = spherical_coords_from_vec(lN_vec_J_aligned, return_trigonometric=True)
-	R_L0p_to_xz = np.array([[ cphLJ, sphLJ, 0],
-	                        [-sphLJ, cphLJ, 0],
-	                        [     0,     0, 1]])
+	#the direction of observation N in the source frame, following the LAL convention
+	phi_N = 0.5*np.pi - phi_ref
+	cinc, sinc = np.cos(inclination), np.sin(inclination)
 
-	#compute unit vector pointing from the observer to the binary (in binary frame)
-	k_hat = -np.array([0,0,1])
-	
-	#compute the result of applying the two rotation matrices to this unit vector
-	k_hat_Jframe = np.dot(R_L0p_to_xz, np.dot(R_J_to_z, k_hat))
-	
-	#compute the corresponding spherical coordinate angles
-	cos_theta_JN, phi_JN = spherical_coords_from_vec(k_hat_Jframe, return_trigonometric=False)
-	
+	#fold an inclination outside [0, pi] using N(-inclination, phi_N) = N(inclination, phi_N + pi). cos is even, so only sinc and phi_N change
+	if sinc < 0: sinc, phi_N = -sinc, phi_N + np.pi
+	cphN, sphN = np.cos(phi_N), np.sin(phi_N)
+
+	#When the spins are exactly aligned, the J frame is equal to the L frame, i.e. the source frame rotated by pi about z, and the angles below are analytic
+	if MSA.no_precession:
+
+		#the origin of the orbital phase is the source frame x axis itself
+		l0 = 0.
+
+		#k=-N in the J frame. At inclination=0,pi only {}_{-2}Y_{l,2}(0,phi) ~ e^{2 i phi} survives at one pole and {}_{-2}Y_{l,-2}(pi,phi) at
+		#the other, and their e^{+-2 i phi_JN} with phi_JN = phi_N is what the LAL identity requires
+		cos_theta_JN, sin_theta_JN, phi_JN = -cinc, sinc, phi_N
+
+		#a rotation about z leaves the polarization basis alone, so the J frame one is already the LAL one
+		gamma_pol = 0.
+
+	#otherwise build the J frame from the direction of the total angular momentum
+	else:
+
+		#compute the total angular momentum vector in the LAL source frame and its direction
+		J_vec = MSA.bJ*(s0_1 + s0_2) + MSA.cJ*(s0_1 - s0_2)
+		J_vec[2] += MSA.aJ
+		J_hat = J_vec/np.linalg.norm(J_vec)
+
+		#azimuth of J and inclination of L with respect to J. \alpha is degenerate when J has no perpendicular part, but
+		#it enters both the phase origin l0 and the J frame below, so its (arbitrary) value cancels out of the waveform
+		alpha = np.arctan2(J_hat[1], J_hat[0])
+		cos_thL, sin_thL = J_hat[2], np.hypot(J_hat[0], J_hat[1])
+		ca, sa = np.cos(alpha), np.sin(alpha)
+
+		#build the J frame: z along J and L on the x-z plane with positive x component, i.e. L_J = (sin\theta_L, 0, cos\theta_L)
+		z_J = np.array([ sin_thL*ca,  sin_thL*sa, cos_thL])
+		x_J = np.array([-cos_thL*ca, -cos_thL*sa, sin_thL])
+		y_J = np.array([         sa,         -ca,      0.])
+
+		#the origin of the orbital phase is the projection of J on the orbital plane, so the reference \lambda is the
+		#azimuth of \hat{n} (the x axis of the source frame) measured from it
+		l0 = -alpha
+
+		#compute the spherical angles of the unit vector pointing from the observer to the binary (k=-N) in the J frame
+		N_vec = np.array([sinc*cphN, sinc*sphN, cinc])
+		k_hat_Jframe = -np.array([np.dot(N_vec, x_J), np.dot(N_vec, y_J), np.dot(N_vec, z_J)])
+		cos_theta_JN, sin_theta_JN = k_hat_Jframe[2], np.hypot(k_hat_Jframe[0], k_hat_Jframe[1])
+		#when N is parallel to J the azimuth is degenerate (as in the atan2tol of LALSimIMRPhenomP.c), take it to be 0
+		phi_JN = arctan2_tol(k_hat_Jframe[1], k_hat_Jframe[0])
+
+		#gamma_pol rotates the polarization basis (\hat{theta}, \hat{phi} at N) from the J frame to the source frame. \hat{theta}_J is built from the
+		#same phi_JN as the spherical harmonics, so the value chosen by arctan2_tol at a degenerate direction cancels out, and being a unit vector
+		#in the plane of (\hat{theta}_S, \hat{phi}_S) its arctan2 arguments are always O(1). N=-k has cos=-cos_theta_JN and azimuth phi_JN+pi in the J frame
+		cpJ, spJ = np.cos(phi_JN), np.sin(phi_JN)
+		th_J = cos_theta_JN*(cpJ*x_J + spJ*y_J) - sin_theta_JN*z_J
+		th_S = np.array([cinc*cphN, cinc*sphN, -sinc])
+		ph_S = np.array([-sphN, cphN, 0.])
+		gamma_pol = np.arctan2(np.dot(th_J, ph_S), np.dot(th_J, th_S))
+
+	#compute reference \delta\lambda from above Eq.(17a) of 1801.08542, so that l0 - dl0 is the mean anomaly
+	dl0 = l0 - phi_e_ref
+
 	#compute initial conditions on v=[y, e2, l, dl, DJ2, bpsip, phiz0, zeta0]
 	v_ini = np.array([y_ref,e2_ref,l0,dl0,DJ20,bpsip0,phiz00,zeta00])
 
-	#return relevant parameters and initial conditions, together with the effective (possibly clamped) reference frequency,
-	#the 0PN estimate of the squared eccentricity at f0_orb and the flag indicating whether the reference was clamped
-	return v_ini, yf, s2_1, s2_2, MSA, cos_theta_JN, phi_JN, fref_orb_eff, e2_0_est, ref_clamped
+	#return relevant parameters and initial conditions, together with the direction of k in the J frame (cos_theta_JN, sin_theta_JN, phi_JN), the polarization
+	#rotation gamma_pol, the effective (possibly clamped) reference frequency, the 0PN estimate of the squared eccentricity at f0_orb and the flag indicating
+	#whether the reference was clamped
+	return v_ini, yf, s2_1, s2_2, MSA, cos_theta_JN, sin_theta_JN, phi_JN, gamma_pol, fref_orb_eff, e2_0_est, ref_clamped
 
 #Function to compute constant part of h0 from Eq.(20) of 2402.06804, i.e. we want to compute  4\sqrt{\pi/5} M \nu/d_L
 # to obtain h0 we have to multiply by (M\omega)**(2/3) = ((1-e2)*(y**2)) (Eq.(5))
@@ -392,7 +416,7 @@ def derivatives_prec_avg(y, e2, DJ2, PN_derivatives, MSA):
 class MultipleScaleAnalysis:
 	
 	#initialize computing the things that will stay constant throught the evolution
-	def __init__(self, m1, m2, sz_1, sz_2, sp2_1, sp2_2, pn_spin_order=6, dmu_small_threas=1e-12, N_cubic_solves=2):
+	def __init__(self, m1, m2, sz_1, sz_2, sp2_1, sp2_2, pn_spin_order=6, dmu_small_threas=1e-12, N_cubic_solves=2, m_ellip_max=float(np.nextafter(1.0, 0.0))):
 
 		#make sure all inputs are floats because they will be more efficient to operate with than np.floats
 		m1, m2, sz_1, sz_2, sp2_1, sp2_2 = float(m1), float(m2), float(sz_1), float(sz_2), float(sp2_1), float(sp2_2)
@@ -404,7 +428,10 @@ class MultipleScaleAnalysis:
 		self.sz_2 = sz_2
 		self.sp2_1 = sp2_1
 		self.sp2_2 = sp2_2
+		#flag for exactly aligned spins, in which case there is no precession and the J frame is the L frame.
+		self.no_precession = (sp2_1 == 0) and (sp2_2 == 0)
 		self.dmu_small_threas = dmu_small_threas
+		self.m_ellip_max = m_ellip_max
 
 		#set up the pn_spin_order
 		if pn_spin_order==-1: self.pn_spin_order = 8
@@ -620,6 +647,7 @@ class MultipleScaleAnalysis:
 				self.sin, self.cos = math.sin, math.cos
 				self.sqrt, self.arctan2 = math.sqrt, math.atan2
 				self.maximum = max
+				self.minimum = min
 				self.safe_divide = safe_divide_by_scalar
 		else:
 			self.scalar_y = False
@@ -627,6 +655,7 @@ class MultipleScaleAnalysis:
 			self.sin, self.cos = np.sin, np.cos
 			self.sqrt, self.arctan2 = np.sqrt, np.arctan2
 			self.maximum = np.maximum
+			self.minimum = np.minimum
 			self.safe_divide = safe_divide_by_array
 
 		#save input y and DJ2
@@ -814,7 +843,7 @@ class MultipleScaleAnalysis:
 		self.sqY3mYm = self.sqrt(2*sqpacT2*cargG_3_m_pi_6)
 
 		#compute the parameter m of the Jacobi functions
-		self.m = sargG_3/cargG_3_m_pi_6
+		self.m = self.minimum(sargG_3/cargG_3_m_pi_6, self.m_ellip_max)
 	
 	#method to compute the precesion average factors of Eq.(65) and Eq.(72) of 2106.10291 that appear in beta and sigma
 	def precesion_average_factors_betasigma(self, mthreas=0.1):
@@ -920,7 +949,7 @@ class MultipleScaleAnalysis:
 		costhL = self.safe_divide(self.aJ + self.bJ*self.chi0mod+ self.cJmod*dchi, self.J)
 
 		#return variation of Euler angles on precession timescales, forcing costhL to be between -1 and 1
-		return dphiz, dzeta, np.maximum(np.minimum(costhL, 1),-1)
+		return dphiz, dzeta, np.clip(costhL, -1, 1)
 
 	#function to compute (DDJ2/Dy)/(-2*cJmodxddchi/y2)
 	def compute_kDDJ2(self,):
@@ -1266,12 +1295,86 @@ class pyEFPE_PN_derivatives:
 		S32Aav   = m1_4_m2*Sigma32_1 + m2_4_m1*Sigma32_2
 		S32Adiff = m1_4_m2*Sigma32_1 - m2_4_m1*Sigma32_2
 		
-		#tidal coefficients
-		self.a10TQC = (144/5)*L2Aav + (12/5)*L2Bav
-		self.a12TQC = (4421/140 - (571/10)*nu)*L2Aav + (38/35 + (751/10)*nu)*L2Bav + (4148/15)*S2Aav - (4/15)*S2Bav
-		self.a13TQC = np.pi*((576/5)*L2Aav + (48/5)*L2Bav)
-		self.a14TQC = (6993499/15120 + (18677/105)*nu - (1239/10)*nu2)*L2Aav + (21011/630 + (378769/560)*nu - (5231/12)*nu2)*L2Bav + 60*L3Aav + (74966/105 - (11854/15)*nu)*S2Aav + (-299/315 + (15506/15)*nu)*S2Bav
-		self.a15TQC = np.pi*((62199/280 - (12469/20)*nu)*L2Aav + (152/35 + (5139/20)*nu)*L2Bav + (5528/5)*S2Aav - (8/15)*S2Bav)
+		#e^{2n} coefficients appearing in tidal part of dy/dt
+		self.p_a10T    = my_cpoly(L2Aav*np.array([144/5, 836/5, 31047/160, 14937/320, 943/640])
+		                        + L2Bav*np.array([12/5, 351/10, 549/8, 381/16, 99/128]))
+		self.sqrt_a10T = my_cpoly(L2Aav*np.array([ -6., 137/20, -635/32, -431/320, 67/160]))
+
+		self.p_a12T    = my_cpoly(L2Aav*(np.array([4421/140, 1319937/560, 985073/128, 204209/40, 12368995/14336, 45101/2560]) + nu*np.array([-571/10, -21935/12, -1335341/240, -1974391/480, -642493/960, -6329/384])) 
+		                        + L2Bav*(np.array([38/35, 90621/280, 217845/112, 231639/112, 756747/1792, 57501/7168]) + nu*np.array([751/10, 885/8, -372337/320, -227927/128, -197483/512, -9.]))
+		                        + S2Aav*(np.array([4148/15, 9978/5, 32397/10, 7791/8, 13431/64, 47/64]))
+		                        + S2Bav*(np.array([-4/15, -54/5, -273/5, -119/2, -441/32, -21/64])))
+		self.sqrt_a12T = my_cpoly(L2Aav*(np.array([-22467/280, 6215/112, 28723/280, -1102047/1120, 195451/17920, 57481/8960]) + nu*np.array([99/10, -12529/120, 147/10, 484171/960, 12743/256, -2009/384]))
+		                        + L2Bav*nu*np.array([-35, 45/8, -3195/64, -7075/128, 1175/64, 0])
+		                        + S2Aav*np.array([-168, 15, -34, -5689/8, 1979/32, -7/16]))
+		
+		self.p_a13T    = my_cpoly(np.pi*(L2Aav*(576/5)*np.array([1, 24679/2304, 36403/1536, 3092927/221184, 20138917/21233664, -242265263/283115520])
+		                        + L2Bav*(48/5)*np.array([1, 1689/64, 13509/128, 3633127/36864, 1002787/49152, 52964281/117964800])))
+
+		self.p_a14T    = my_cpoly(L2Aav*(np.array([6993499/15120, 15714269/1512, 1102179223/15120, 52322942411/483840, 3070450891/86016, 86768245/18432, 11317927/172032]) + nu*(np.array([18677/105, -4227115/672, -80707429/840, -4801163293/26880, -8385074287/107520, -768392641/86016, -16057529/107520]) + nu*np.array([-1239/10, 357469/80, 181318513/3840, 392908657/4608, 191582975/4608, 54700813/11520, 13669/144]))) 
+		                        + L2Bav*(np.array([21011/630, 173864/105, 109168823/6720, 158511807/4480, 397260377/21504, 405549581/215040, 177965/14336]) + nu*(np.array([378769/560, 7906847/672, 19089725/1344, -399309413/10752, -1005710919/28672, -937810319/215040, -402673/7168]) + nu*np.array([-5231/12, -4250659/720, -27142819/5760, 256379107/11520, 193185643/9216, 376791/128, 1605/32])))
+		                        + L3Aav*np.array([60, 7879/16, 59239/64, 107649/256, 163543/2048, 1015/512, 0])
+		                        + S2Aav*(np.array([74966/105, 4203881/140, 12029685/112, 31471151/336, 12672169/896, 7781601/2560, 52095/7168]) + nu*np.array([-11854/15, -888734/45, -12419029/180, -11093731/180, -3679321/360, -2156525/1152, -1607/192]))
+		                        + S2Bav*(np.array([-299/315, -9988/105, -315713/280, -83777/30, -222105/128, -9529/40, -3317/1024]) + nu*np.array([15506/15, 29308/3, 4011151/180, 10664423/720, 25953361/5760, 1714169/2880, 973/192])))
+		self.sqrt_a14T = my_cpoly(L2Aav*(np.array([5313599/7560, 99753767/15120, 5004769589/241920, -10792769629/483840, -5486137117/161280, -132934883/80640, 11479/672]) + nu*(np.array([-791837/1680, -7014449/1680, -5758529/384, 9966857/672, 194204035/7168, 89192267/71680, -6706709/107520]) + nu*np.array([3437/30, 399151/480, 4898621/1280, -86360387/23040, -36300523/5760, -3070357/5760, 10193/288]))) 
+		                        + L2Bav*(np.array([66, 7149/4, 78573/16, -99015/32, -1741125/256, -350625/256, -3015/128]) + nu*(np.array([-1309361/1680, -5539817/3360, -11194711/8960, -52850815/10752, 34937057/21504, 514863/512, 603/64]) + nu*np.array([1013/4, 967/36, -12503/1152, 6274115/2304, 4595645/4608, -67005/256, 0])))
+		                        + L3Aav*np.array([-135/4, -735/32, -605/32, -22295/256, 31135/1024, 805/512, 0])
+		                        + S2Aav*(np.array([-88273/70, -392771/140, 1021067/140, -2125539/112, -18058423/896, 2508803/1792, 5753/896]) + nu*np.array([2478/5, -8321/15, -125261/30, 139121/12, 1422131/96, -45341/96, -233/48]))
+		                        + S2Bav*nu*np.array([-4284/5, -25109/30, 20111/60, -62713/16, -26299/192, 19159/96, 0]))
+
+		self.p_a15T    = my_cpoly(np.pi*(L2Aav*((62199/280)*np.array([1, 8244257/124398, 3122110229/7961472, 8425780561/15922944, 72889899301/382150656, -321835060033/38215065600]) + nu*(-12469/20)*np.array([1, 14581339/523698, 543887075/4189584, 2873062081/16758336, 1259854466359/19305603072, 217583883851/965280153600]))
+		                        + L2Bav*((152/35)*np.array([1, 519939/1216, 22964451/4864, 7445548135/700416, 11520947777/1867776, 1831512481007/2241331200]) + nu*(5139/20)*np.array([1, -185047/143892, -59491027/767424, -5288868773/27627264, -43436295845/378888192, -1564634629573/88407244800]))
+		                        + S2Aav*(5528/5)*np.array([1, 27953/2764, 1750279/66336, 19833731/1592064, -234543767/50946048, -78228667513/15283814400])
+		                        + S2Bav*(-8/15)*np.array([1, 87, 27385/32, 286957/144, 10492679/8192, 368318011/1843200])))
+
+		#e^{2n} coefficients appearing in tidal part of d(e^2)/dt
+		self.p_b10T    = my_cpoly(L2Aav*np.array([2049/10, 45143/40, 186103/160, 283703/1280, 135/32])
+		                        + L2Bav*np.array([306/5, 4383/10, 2241/4, 4581/32, 117/32]))
+		self.sqrt_b10T = my_cpoly(L2Aav*np.array([110., 7391/40, 4057/160, -221/160]))
+
+		self.p_b12T    = my_cpoly(L2Aav*(np.array([-8119/14, 23909213/2240, 181564903/4480, 978752881/35840, 34386317/10240, 69129/1792]) + nu*np.array([-7517/15, -965723/80, -16085557/480, -14078923/640, -2249095/768, -2565/64]))
+		                        + L2Bav*(np.array([-6927/70, 254567/80, 4185269/280, 11069089/896, 18209263/8960, 458709/14336]) + nu*np.array([3837/20, -194121/80, -3890003/320, -5607683/512, -998717/512, -2277/64]))
+		                        + S2Aav*np.array([1516/3, 202949/30, 21875/2, 1013453/240, 198221/960, -225/128])
+		                        + S2Bav*np.array([-76/3, -369, -1057, -6265/8, -4347/32, -329/128]))
+		self.sqrt_b12T = my_cpoly(L2Aav*(np.array([301437/280, 1060691/160, 3173225/448, 2859989/8960, -191119/8960]) + nu*np.array([-13087/30, -324351/80, -59527/16, -254477/640, 33163/1920]))
+		                        + L2Bav*nu*np.array([1555/3, 15065/16, 87575/192, -3625/64, 0])
+		                        + S2Aav*np.array([2488, 11403/2, 20749/4, 171/16, 1/16]))
+
+		self.p_b13T    = my_cpoly(np.pi*(L2Aav*(14219/8)*np.array([1, 549103/71095, 174556741/13650240, 527873381/81901440, 15318454303/26208460800, -10560207337/78625382400])
+		                        + L2Bav*(1491/4)*np.array([1, 30789/2485, 5007661/159040, 121605541/5725440, 446499763/130867200, 27852151/458035200])))
+
+		self.p_b14T    = my_cpoly(L2Aav*(np.array([-82743697/15120, -1216333963/17280, 2720493533/24192, 24485741279/46080, 344719420351/1290240, 6451484171/286720, 9003637/57344]) + nu*(np.array([1827601/210, 4490959/140, -2726590009/6720, -10076963933/10752, -578882411/1344, -2113698147/57344, -495969/1792]) + nu*np.array([-38227/144, 99997487/2880, 3287046031/11520, 43147973551/92160, 9464460739/46080, 225900263/11520, 6255/32]))) 
+		                        + L2Bav*(np.array([-9445/7, -1435301/160, 130189411/1680, 1044284889/4480, 455325695/3584, 5928020881/430080, 3729585/28672]) + nu*(np.array([4234787/1680, 102715421/1920, -1426909/4480, -1962033783/7168, -27436469973/143360, -461104567/20480, -118927/512]) + nu*np.array([-195761/120, -326623/24, 84553123/1920, 2591459329/15360, 162144067/1536, 20565367/1536, 5655/32])))
+		                        + L3Aav*np.array([2701/12, 467425/192, 137051/32, 717151/384, 945883/6144, 105/128, 0])
+		                        + S2Aav*(np.array([-542939/210, 12939691/210, 585876119/1680, 1005358889/2688, 629048467/6720, 322666189/107520, -143573/7168]) + nu*np.array([9268/15, -438757/10, -4344581/20, -36017293/160, -85861273/1440, -19321867/11520, 825/32]))
+		                        + S2Bav*(np.array([1099/15, -9062/15, -432463/40, -893949/40, -1419607/128, -38423/32, -12529/1024]) + nu*np.array([86654/45, 156453/4, 4671832/45, 126391667/1440, 137091827/5760, 6057949/2880, 2443/96])))
+		self.sqrt_b14T = my_cpoly(L2Aav*(np.array([652145/63, 465567461/3360, 28726706081/80640, 265153067/1344, 181722059/17920, -443487/8960]) + nu*(np.array([-402401/112, -98244221/1120, -3567895967/13440, -4217364169/26880, -59563387/7168, 21617483/107520]) + nu*np.array([-70141/90, 49912583/2880, 246826639/3840, 48388043/1280, 17478931/5760, -16465/144]))) 
+		                        + L2Bav*(np.array([2439, 123759/4, 607905/8, 3004065/64, 207675/32, 5805/64]) + nu*(np.array([4660647/560, 7545683/210, 167396401/5376, -25931313/3584, -14386763/3584, -1161/32]) + nu*np.array([-156737/36, -3704137/144, -33915575/1152, -16762745/2304, 621985/768, 0])))
+		                        + L3Aav*np.array([1735/4, 60975/64, 98345/128, -29745/512, -2515/512, 0])
+		                        + S2Aav*(np.array([3021359/210, 22628569/140, 47491121/168, 88288349/672, -217397/128, -95765/2688]) + nu*np.array([-174674/15, -1638601/15, -542659/3, -2167483/24, -16613/24, 1411/48]))
+		                        + S2Bav*nu*np.array([165172/15, 1894837/60, 293335/8, 462077/96, -59857/96, 0]))
+
+		self.p_b15T    = my_cpoly(np.pi*(L2Aav*((728991/280)*np.array([1, 797698129/15551808, 1907561477/7775904, 7471204533529/26873524224, 8150141836301/89578414080, 23051561741023/20638866604032]) + nu*(-2826623/240)*np.array([1, 385730049/22612984, 219572776067/3798981312, 5522175308437/91175551488, 16212773766297/810449346560, 190734337323941/250081512652800]))
+		                        + L2Bav*((-144331/140)*np.array([1, -20724175/1154648, -1301470649/6927888, -449078422319/1330154496, -2809221442669/17735393280, -22149413239687/1276948316160]) + nu*(693365/336)*np.array([1, -214893997/13867300, -81817497077/665630400, -1552171760033/7987564800, -22417919049971/255602073600, -1599730171037041/153361244160000]))
+		                        + S2Aav*(230774/15)*np.array([1, 2938101/461548, 223866919/22154304, 816033053/531703296, -105984782861/42536263680, -3074077668623/2552175820800])
+		                        + S2Bav*(-1528/15)*np.array([1, 39095/1528, 2434063/18336, 354168539/1760256, 6621836617/70410240, 32059415041/2816409600])))
+
+		#e^{2n} coefficients appearing in tidal part of k
+		self.p_k8T     = my_cpoly(L2Aav*np.array([45/32, 135/64, 45/256]))
+
+		self.p_k10T    = my_cpoly(L2Aav*(np.array([81/8, 2187/32, 5373/128, 855/512]) + nu*np.array([75/64, -2265/128, -9825/512, -615/512]))
+		                        + L2Bav*nu*np.array([315/64, 1575/128, 1575/512, 0])
+		                        + S2Aav*np.array([39/2, 135/2, 495/16, 75/64]))
+		self.sqrt_k10T = my_cpoly(L2Aav*np.array([9/8, 81/32, 9/16]))
+
+		self.p_k12T    = my_cpoly(L2Aav*(np.array([2061/64, 21393/32, 163395/128, 371457/1024, 28215/4096]) + nu*(np.array([7263/256, -27015/512, -1381617/2048, -83097/256, -18615/2048]) + nu*np.array([-665/64, -5005/128, 56235/512, 93035/1024, 8815/2048]))) 
+		                        + L2Bav*nu*(np.array([17991/256, 256329/512, 978975/2048, 59985/1024, 0]) + nu*np.array([-945/64, -19215/128, -92925/512, -29925/1024, 0]))
+		                        + L3Aav*np.array([105/32, 1575/128, 1575/256, 525/2048, 0])
+		                        + S2Aav*(np.array([543/4, 5763/4, 7965/4, 14511/32, 4125/512]) + nu*np.array([-29/4, -429, -28245/32, -35465/128, -975/128]))
+		                        + S2Bav*nu*np.array([289/4, 357, 8925/32, 4165/128, 0]))
+		self.sqrt_k12T = my_cpoly(L2Aav*(np.array([1827/32, 2061/8, 42903/256, 1377/128]) + nu*np.array([-309/16, -6261/64, -2157/32, -6])) 
+		                        + L2Bav*nu*np.array([75/16, 825/64, 225/32, 0])
+		                        + S2Aav*np.array([45/2, 315/4, 1125/16, 45/8]))
 		
 		#spin-tidal coefficients
 		self.chi_a13STQC = -(1292/5)*L2Aav - (64/5)*L2Bav - (986/3)*S2Aav + (2/15)*S2Bav - (856/5)*L23Aav + (272/5)*L32Aav + (833/15)*S23Aav - (204/5)*S32Aav - 8*L23Bav - (1/15)*S23Bav
@@ -1292,9 +1395,9 @@ class pyEFPE_PN_derivatives:
 		chi_effdchi = chi_eff*dchi
 
 		#initialize the PN derivatives
-		Dy  = 0
-		De2 = 0
-		k   = 0
+		Dy  = 0.
+		De2 = 0.
+		k   = 0.
 		
 		#add the required terms
 		if self.pn_phase_order>=9:
@@ -1370,18 +1473,28 @@ class pyEFPE_PN_derivatives:
 			k   = y2*(k   + self.k0NS)
 		
 		#if required, add the tidal terms
-		DyTidal = 0
+		DyTidal  = 0.
+		De2Tidal = 0.
+		kTidal   = 0.
 		if self.pn_tidal_order>=15:
-			DyTidal = y*(DyTidal + self.a15TQC)
+			DyTidal  = y*(DyTidal  + self.p_a15T(e2))
+			De2Tidal = y*(De2Tidal + self.p_b15T(e2))
 		if self.pn_tidal_order>=14:
-			DyTidal = y*(DyTidal + self.a14TQC)
+			DyTidal  = y*(DyTidal  + self.p_a14T(e2) + sqrt_a*self.sqrt_a14T(e2))
+			De2Tidal = y*(De2Tidal + self.p_b14T(e2) + sqrt1me2*self.sqrt_b14T(e2))
+			kTidal   =y2*(kTidal   + self.p_k12T(e2) + sqrt1me2*self.sqrt_k12T(e2))
 		if self.pn_tidal_order>=13:
-			DyTidal = y*(DyTidal + self.a13TQC + chi_eff*self.chi_a13STQC + dchi*self.dch_a13STQC)
+			DyTidal  = y*(DyTidal  + self.p_a13T(e2) + chi_eff*self.chi_a13STQC + dchi*self.dch_a13STQC)
+			De2Tidal = y*(De2Tidal + self.p_b13T(e2))
 		if self.pn_tidal_order>=12:
-			DyTidal =y2*(DyTidal + self.a12TQC)
+			DyTidal  =y2*(DyTidal  + self.p_a12T(e2) + sqrt_a*self.sqrt_a12T(e2))
+			De2Tidal =y2*(De2Tidal + self.p_b12T(e2) + sqrt1me2*self.sqrt_b12T(e2))
+			kTidal   =y2*(kTidal   + self.p_k10T(e2) + sqrt1me2*self.sqrt_k10T(e2))
 		if self.pn_tidal_order>=10:
-			Dy += y2*y8*(DyTidal + self.a10TQC)
-		
+			Dy  +=    y2*y8*(DyTidal  + self.p_a10T(e2) + sqrt_a*self.sqrt_a10T(e2))
+			De2 += e2*y2*y8*(De2Tidal + self.p_b10T(e2) + sqrt1me2*self.sqrt_b10T(e2))
+			k   +=    y2*y8*(kTidal   + self.p_k8T(e2))
+
 		#always take into account the 0PN terms of Dy and De2
 		Dy = y*y8*self.nu*(self.p_a0NS(e2) + Dy)
 		De2 = -y8*self.nu*(e2*self.p_b0NS(e2) + De2)
@@ -1492,3 +1605,50 @@ def compute_e2_of_f_0PN(f, e20, f0, atol=1e-14, maxiter_Newton=6):
 
 	return np.where(circular, 0.0, e2)
 
+#function to compute the matter-effect parameters of a neutron star from its dimensionless mass quadrupolar tidal deformability Lambda2 using quasi-universal relations
+#returns a dictionary with the pyEFPE keys ('q', 'o', 'Lambda2', 'Lambda3', 'Sigma2', 'Lambda23', 'Lambda32', 'Sigma23', 'Sigma32'), the compactness 'C' (=G m/(c^2 R)) and the dimensionless moment of inertia 'I' (=I_moment/m^3)
+#if companion (1 or 2) is given, the keys follow the pyEFPE naming for that companion ('q1', 'o1', 'Lambda2_1', 'Lambda3_1', 'Sigma2_1', ..., 'C_1', 'I_1') so that they can be merged into the pyEFPE parameter dictionary, dropping 'C_i' and 'I_i', which pyEFPE does not use as parameters
+#Lambda2=0 is interpreted as a black hole (q=o=1, all deformabilities 0, C=1/2, I=nan); the fits are valid for 2.3<=Lambda2<=1e4, and outside that range they are evaluated at its closest edge (with a warning)
+#the pyEFPE Sigma2 is the current-quadrupole polarizability sigma^(2)/m^5 of Eq.(1.6b) of arXiv:2005.13367, which enters the phase as Eq.(18) of arXiv:1805.01487, i.e. it is the same quantity (sign included) as the Sigma2 of arXiv:1807.08016 and arXiv:2210.09425, and it is negative for the (physical) irrotational fluid
+#the rotational tidal Love numbers Lambda23, Lambda32, Sigma23 and Sigma32 are set to 0, since there is no fit in terms of Lambda2 in the convention of arXiv:1805.01487
+#a user having their own values can use the hidden symmetry Sigma32 = 4 Lambda23, Lambda32 = 2 Sigma23 (Eq.(28) of arXiv:2103.16595, Eq.(3) of arXiv:2204.12510) to fill the missing ones
+def neutron_star_quasi_universal_relations(Lambda2, companion=None):
+
+	#the fits are only valid for Lambda2_min<=Lambda2<=Lambda2_max, and extrapolated outside that range their polynomials diverge, so Lambda2 is clamped
+	Lambda2_min, Lambda2_max = 2.3, 1e4
+	Lambda2_fit = min(max(Lambda2, Lambda2_min), Lambda2_max)
+
+	#check the input
+	if Lambda2<0: raise ValueError('Lambda2 has to be non-negative, but Lambda2=%s was given'%(Lambda2))
+	if (Lambda2>0) and ((Lambda2<Lambda2_min) or (Lambda2>Lambda2_max)): warnings.warn('The neutron star quasi-universal relations are only valid for %g<=Lambda2<=%g, but Lambda2=%s was given; evaluating them at Lambda2=%g instead'%(Lambda2_min, Lambda2_max, Lambda2, Lambda2_fit), UserWarning, stacklevel=2)
+
+	#Lambda2=0 is a black hole (the moment of inertia of a black hole is not defined)
+	if Lambda2==0:
+		result = {'q': 1.0, 'o': 1.0, 'Lambda2': 0.0, 'Lambda3': 0.0, 'Sigma2': 0.0, 'Lambda23': 0.0, 'Lambda32': 0.0, 'Sigma23': 0.0, 'Sigma32': 0.0, 'C': 0.5, 'I': np.nan}
+	else:
+		#all the fits are polynomials P(x) = sum_k a_k x^k in the natural logarithm x = ln(Lambda2_fit), we use np.polyval which takes the coefficients in reverse order
+		x = np.log(Lambda2_fit)
+
+		#Love-Q relation ln(Q) = P(ln(Lambda2)) with Q = -Q_quad/(M^3 chi^2) the Kerr normalized quadrupole: Eq.(15) and Table 1 (Q-lambda2 row) of arXiv:1608.02582
+		lnq = np.polyval([1.245e-4, -4.283e-3, 0.04812, 0.09163, 0.1940], x)
+
+		#S3-Q relation ln(S3) = P(ln(Q)) with S3 = -S_3/(M^4 chi^3) the Kerr normalized spin octupole: Eq.(15) form and Table 2 (S3-M2 row) of arXiv:1608.02582, also Eq.(39) of NRTidalv3 (arXiv:2311.07456)
+		lno = np.polyval([-0.03309, 0.2458, -0.7152, 2.071, 3.131e-3], lnq)
+
+		#Love-I relation ln(I) = P(ln(Lambda2)) with I = I_moment/M^3 the dimensionless moment of inertia: Eq.(15) and Table 1 (I-lambda2 row) of arXiv:1608.02582
+		lnI = np.polyval([8.345e-6, -6.953e-4, 0.02238, 0.05951, 1.496], x)
+
+		#Lambda3-Lambda2 relation ln(Lambda3) = P(ln(Lambda2)): Eq.(9) and Table II ("This Work" row) of arXiv:2210.09425 (~6000 EoSs, 11% maximum error)
+		lnLambda3 = np.polyval([3.494e-5, -1.117e-3, 1.374e-2, -8.170e-2, 2.492e-1, 9.442e-1, -1.163], x)
+
+		#|Sigma2|-Lambda2 relation ln(|Sigma2|) = P(ln(Lambda2)) for an irrotational fluid: Eq.(9) and Table II ("This Work" row) of arXiv:2210.09425 (3% maximum error)
+		lnSigma2 = np.polyval([-5.192e-7, 2.643e-5, -5.03e-4, 4.096e-3, 7.609e-4, 4.821e-1, -2.019], x)
+
+		#C-Lambda2 relation C = P(ln(Lambda2)): Eq.(9) and Table III ("This Work" row) of arXiv:2210.09425 (4% maximum error)
+		C = np.polyval([-1.606e-6, 4.463e-5, -4.491e-4, 1.941e-3, -2.243e-3, -3.727e-2, 3.663e-1], x)
+
+		result = {'q': np.exp(lnq), 'o': np.exp(lno), 'Lambda2': Lambda2, 'Lambda3': np.exp(lnLambda3), 'Sigma2': -np.exp(lnSigma2), 'Lambda23': 0.0, 'Lambda32': 0.0, 'Sigma23': 0.0, 'Sigma32': 0.0, 'C': C, 'I': np.exp(lnI)}
+
+	#if a companion is given, use the pyEFPE naming of its parameters, which has no underscore for q and o
+	if companion is None: return result
+	else: return {(key if key in ('q', 'o') else key+'_')+str(companion): value for key, value in result.items()}

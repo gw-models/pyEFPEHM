@@ -13,11 +13,22 @@ def clean_mode_array(mode_array, pn_amplitude_order=2):
 	else:
 		max_mode_array = [(2,0),(2,2)]
 
-	#convert input mode_array to a set of tuples
-	input_mode_array_set = set(map(tuple, mode_array))
+	#convert input mode_array to a set of (l, |m|) tuples: negative-m modes are implied by their positive-m partner
+	input_mode_array_set = {(l, abs(m)) for l, m in mode_array}
 
-	#return modes in max_mode_array that are also in the input mode_array
-	return np.array([mode for mode in max_mode_array if mode in input_mode_array_set], dtype=int)
+	#warn about requested modes that are not supported at this pn_amplitude_order
+	unsupported_modes = sorted(input_mode_array_set - set(max_mode_array))
+	if unsupported_modes:
+		warnings.warn("Removing modes %s from mode_array since they are not supported at pn_amplitude_order=%s"%(unsupported_modes, pn_amplitude_order), UserWarning, stacklevel=2)
+
+	#keep modes in max_mode_array that are also in the input mode_array
+	mode_array = np.array([mode for mode in max_mode_array if mode in input_mode_array_set], dtype=int)
+
+	#if no supported modes remain, raise an error
+	if len(mode_array) == 0:
+		raise ValueError("No supported modes remain in mode_array at pn_amplitude_order=%s. Supported modes: %s"%(pn_amplitude_order, max_mode_array))
+
+	return mode_array
 
 #function take process a user specified harmonic_array containing (l,m,p) modes and mode array to be used
 def process_harmonic_array(harmonic_array, max_mode_array, pn_amplitude_order=2):
@@ -26,7 +37,7 @@ def process_harmonic_array(harmonic_array, max_mode_array, pn_amplitude_order=2)
 	if harmonic_array is None: return harmonic_array, max_mode_array
 	
 	#Make sure input harmonic_array has the correct format (copy to avoid mutating the caller's array)
-	harmonic_array = np.atleast_2d(np.array(harmonic_array, dtype=int))
+	harmonic_array = np.atleast_2d(np.array(harmonic_array, dtype=np.int64))
 	if harmonic_array.ndim != 2 or harmonic_array.shape[1] != 3:
 		raise ValueError("harmonic_array must have shape (N, 3) with columns (l, m, p); got shape %s"%(harmonic_array.shape,))
 
@@ -36,7 +47,8 @@ def process_harmonic_array(harmonic_array, max_mode_array, pn_amplitude_order=2)
 		harmonic_array = harmonic_array[~idxs_p_is_0]
 	
 	#if a mode has a negative m, do (l, m, p)->(l, -m, -p)
-	idxs_neg_m = harmonic_array[:,1]<0
+	#for m=0 the p<0 harmonic is the conjugate partner of the p>0 one, so canonicalize it to (l, 0, -p) too
+	idxs_neg_m = (harmonic_array[:,1]<0) | ((harmonic_array[:,1]==0) & (harmonic_array[:,2]<0))
 	if np.any(idxs_neg_m):
 		harmonic_array[idxs_neg_m,1:] = -harmonic_array[idxs_neg_m,1:]
 	
@@ -68,6 +80,11 @@ def process_harmonic_array(harmonic_array, max_mode_array, pn_amplitude_order=2)
 	#return harmonic_array and mode_array
 	return harmonic_array, np.array(mode_list, dtype=int)
 
+#function to apply the negative-m symmetry A^{l,-m} = (-1)^l conj(A^{l,m}) to an amplitude array
+def apply_negative_m_symmetry(A, l):
+	if (l%2)==0: return  np.conj(A)
+	else:        return -np.conj(A)
+
 #Function to compute \sum_{l,m,p>0} |N^{lm}_p|^2 approximating |\exp{-i a y^2}|^2 \approx |1 - i a y^2|^2
 #We use that |N^{l, -m}_p|=|N^{l, m}_{-p}| and therefore
 #for m!=0 -> \sum_{p>0} ||N^{l m}_p|| + ||N^{l -m}_p|| = \sum_{p \in Z} ||N^{l m}_p|| = ||H^{l m}||^2
@@ -92,9 +109,7 @@ def compute_H_norm2_PNconsistent(e2, y, nu, dmu, dchi=0, mode_array=[[2,0],[2,1]
 	one_m_e2 = 1-e2
 	sqrt_1me2 = np.sqrt(one_m_e2)
 	one_m_e2_2 = one_m_e2*one_m_e2
-	one_m_e2_3_2 = one_m_e2*sqrt_1me2
-	one_m_e2_7_2 = one_m_e2_2*one_m_e2_3_2
-	
+
 	#loop over mode array
 	Hnorm = 0
 	for im, mode in enumerate(mode_array):
@@ -276,7 +291,6 @@ def analytical_Nlm_p(p, e2, y, nu, dmu, dchi=0, mode_array=[[2,0],[2,1],[2,2],[3
 	pe = p*e
 	one_m_e2 = 1-e2
 	sqrt_1me2 = np.sqrt(one_m_e2)
-	one_m_e2_2 = one_m_e2*one_m_e2
 	one_m_e2_3_2 = one_m_e2*sqrt_1me2
 	b = e/(1 + sqrt_1me2)
 	b2 = b*b

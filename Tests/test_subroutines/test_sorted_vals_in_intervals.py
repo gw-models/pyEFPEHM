@@ -41,9 +41,9 @@ start_soltime = time.time()
 f_idxs, interp_idxs = pyEFPEHM.functions.sorted_vals_in_intervals(ws, wf.ts_interp_w0, wf.ts_interp_wf)
 print("\nTime to compute sorted_vals_in_intervals with current implementation: %s seconds \n" % (time.time() - start_soltime))
 
-#check in which interpolant of the different modes the ws are in
+#check in which interpolant of the different modes the ws are in (intervals are half-open [x0, xf))
 start_soltime = time.time()
-interp_idxs_where, f_idxs_where = np.where((ws[np.newaxis,:]>=wf.ts_interp_w0[:,np.newaxis]) & (ws[np.newaxis,:]<=wf.ts_interp_wf[:,np.newaxis]))
+interp_idxs_where, f_idxs_where = np.where((ws[np.newaxis,:]>=wf.ts_interp_w0[:,np.newaxis]) & (ws[np.newaxis,:]<wf.ts_interp_wf[:,np.newaxis]))
 print("\nTime to compute sorted_vals_in_intervals with np.where: %s seconds \n" % (time.time() - start_soltime))
 
 print('\nAre all f_idxs the same?',np.all(f_idxs==f_idxs_where))

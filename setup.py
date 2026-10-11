@@ -1,47 +1,13 @@
-import sys, os, re
-from setuptools import setup, find_packages, Extension
+from setuptools import setup, Extension
+from Cython.Build import cythonize
 import numpy
 
-#ensure Cython is installed before importing it
-try:
-    from Cython.Build import cythonize
-except ImportError:
-    print("Cython not found, installing it now...")
-    import subprocess
-    subprocess.run([sys.executable, "-m", "pip", "install", "Cython"], check=True, capture_output=True)
-    from Cython.Build import cythonize
-
-#read the version from the package __init__ so there is a single source of truth
-here = os.path.abspath(os.path.dirname(__file__))
-with open(os.path.join(here, "pyEFPEHM", "__init__.py")) as f:
-    version = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", f.read()).group(1)
-
-#read the long description from the README
-with open(os.path.join(here, "README.md")) as f:
-    long_description = f.read()
-
+#the extension needs numpy's headers, whose path is only known at build time and so
+#cannot be declared statically in pyproject.toml; all other metadata lives there
 setup(
-    name             = 'pyEFPEHM',
-    description      = 'Python package for an efficient fully precessing eccentric inspiral model.',
-    long_description = long_description,
-    long_description_content_type = 'text/markdown',
-    version          = version,
-    author           = 'Gonzalo Morrás, Geraint Pratten, Patricia Schmidt',
-    author_email     = 'gonzalo.morras@ligo.org',
-    license          = 'Apache-2.0',
-    packages         = find_packages(),
-    package_dir      = {'pyEFPEHM': 'pyEFPEHM'},
-    ext_modules      = cythonize([Extension("pyEFPEHM.utils.cython_utils",["pyEFPEHM/utils/cython_utils.pyx"],include_dirs=[numpy.get_include()]),]),
-    url              = 'https://github.com/gw-models/pyEFPEHM',
-    download_url     = 'https://github.com/gw-models/pyEFPEHM',
-    python_requires  = '>=3.8',
-    install_requires = ['numpy','scipy>=1.9.3','Cython'],
-    classifiers      = [
-        'Programming Language :: Python :: 3',
-        'License :: OSI Approved :: Apache Software License',
-        'Operating System :: OS Independent',
-        'Intended Audience :: Science/Research',
-        'Topic :: Scientific/Engineering :: Physics',
-    ],
+    ext_modules = cythonize([
+        Extension("pyEFPEHM.utils.cython_utils",
+                  ["pyEFPEHM/utils/cython_utils.pyx"],
+                  include_dirs=[numpy.get_include()]),
+    ]),
 )
-

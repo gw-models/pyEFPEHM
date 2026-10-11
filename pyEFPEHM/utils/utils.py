@@ -4,29 +4,10 @@ import warnings
 
 from pyEFPEHM.utils.constants import *
 
-# Function to compute spherical coordinates from vector
-def spherical_coords_from_vec(vec, return_trigonometric=True):
-	#treat vec as numpy array
-	vec = np.asarray(vec)
-	
-	#make sure vec has the correct shape
-	assert vec.shape == (3,)
-	
-	#make sure the vector is unitary
-	vec = vec/np.linalg.norm(vec)	
-
-	#compute the cosine of theta from z component
-	cth = vec[2]
-	
-	#compute the phi angle from y and x components
-	ph = np.arctan2(vec[1],vec[0])
-	
-	#choose to return sine and cosine of theta and phi
-	if return_trigonometric:
-		return (1 - cth*cth)**0.5, cth, np.sin(ph), np.cos(ph)
-	#otherwise, return cos(theta) and phi	
-	else:
-		return cth, ph
+#function to compute arctan2 with a tolerance, as the atan2tol of LALSimIMRPhenomP.c: when both arguments are below it the angle is degenerate and 0 is returned instead of the roundoff value
+def arctan2_tol(y, x, tol=1e-15):
+	if (abs(y)<tol) and (abs(x)<tol): return 0.
+	else:                             return np.arctan2(y, x)
 
 
 #function to compute {x^(i+1), i=0,..,N} efficiently
@@ -58,6 +39,16 @@ class my_poly:
 			result = coef + result*x
 		#return the result
 		return result
+
+#function to evaluate the dense-output polynomials y + sum_k Q[...,k] x^(k+1) with Horners method
+#the rows of Q (and y) to use are selected with the rows kwarg, indexing them at each iteration,
+#which is faster than gathering them once when the coefficient table is small enough to stay in cache
+def poly_eval_from_Q_y(x, Q, y=None, rows=slice(None)):
+	result = x*Q[rows,...,-1]
+	for iQ in reversed(range(Q.shape[-1]-1)):
+		result = x*(Q[rows,...,iQ] + result)
+	if y is not None: result += y[rows]
+	return result
 
 #do my custom version of numpy where which is more optimized than numpy where when codition is a boolean
 #Where condition is True, yield true_value, otherwise yield false_value
@@ -194,7 +185,7 @@ class ivp_sol_interp:
 		
 		#extract the relevant Q and y
 		Q = self.Qs[derivative][:,idxs,:]
-		y0 = self.ys[derivative][:,idxs]
+		y = self.ys[derivative][:,idxs]
 
 		#force t to be a numpy array
 		t = np.asarray(t)
@@ -203,7 +194,7 @@ class ivp_sol_interp:
 		segments = np.searchsorted(self.ts, t, side="right") - 1
 		#make sure segments are always greater than 0
 		segments = np.maximum(segments, 0)
-		
+
 		#compute the x of the interpolants
 		x = (t - self.ts[segments])/self.hs[segments]
 
@@ -211,11 +202,8 @@ class ivp_sol_interp:
 		if (x.ndim!=0) and (np.asarray(idxs).ndim!=0): x = x[:,None]
 
 		#now compute the result
-		result = x*Q[segments,...,-1]
-		for iQ in reversed(range(Q.shape[-1]-1)):
-			result = x*(Q[segments,...,iQ] + result)
-		result += y0[segments]
-		
+		result = poly_eval_from_Q_y(x, Q, y=y, rows=segments)
+
 		return np.transpose(result)
 
 #function to compute all mass parameters from m1, m2
@@ -243,18 +231,22 @@ def my_ellipPI(n, m, phi=None):
 		sphi = np.sin(phi)
 		sphi2 = sphi*sphi
 		nsphi2 = n*sphi2
-		return scipy.special.ellipkinc(phi, m) + (nsphi2/3)*sphi*scipy.special.elliprj(1 - sphi2, 1 - m*sphi2, 1, 1-nsphi2)
+		#guard the first two elliprj arguments against negative round-off (they are >=0 mathematically)
+		one_m_sphi2 = np.maximum(1 - sphi2, 0)
+		one_m_msphi2 = np.maximum(1 - m*sphi2, 0)
+		return scipy.special.ellipkinc(phi, m) + (nsphi2/3)*sphi*scipy.special.elliprj(one_m_sphi2, one_m_msphi2, 1, 1-nsphi2)
 
-#function to find for sorted array x, which values of j are in x0[i] <= x[j] <= xf[i]. This function is equivalent (but faster than)
-#i_idxs, x_idxs = np.where((x[np.newaxis,:]>=x0[:,np.newaxis]) & (x[np.newaxis,:]<=xf[:,np.newaxis]))
+#function to find for sorted array x, which values of j are in x0[i] <= x[j] < xf[i]. This function is equivalent (but faster than)
+#i_idxs, x_idxs = np.where((x[np.newaxis,:]>=x0[:,np.newaxis]) & (x[np.newaxis,:]<xf[:,np.newaxis]))
+#the intervals are half-open so that a value exactly at the boundary shared by two consecutive intervals is counted only once
 def sorted_vals_in_intervals(x, x0, xf):
-	
+
 	#check that indeed the x are sorted
 	if np.any(x[:-1]>x[1:]): raise Exception("Input array of values has to be sorted")
 
 	#find initial and final index in each interval
 	i_0 = np.searchsorted(x, x0, side='left')
-	i_f = np.searchsorted(x, xf, side='right')
+	i_f = np.searchsorted(x, xf, side='left')
 	
 	#find intervals where there are values
 	valid_idxs = np.nonzero(i_f > i_0)[0]
@@ -264,13 +256,13 @@ def sorted_vals_in_intervals(x, x0, xf):
 	
 	#construct an array with the indexes of the intervals
 	i_idxs = np.repeat(valid_idxs, lens)
-	
+
 	#construct an array with the index of x each i_idxs corresponds to
 	if len(valid_idxs)>0:
 		x_idxs = np.concatenate([np.arange(i_0[idx], i_f[idx]) for idx in valid_idxs])
 	else:
 		x_idxs = np.array([], dtype=int)
-	
+
 	return x_idxs, i_idxs
 
 #function to perform series reversion, i.e. given y = a1*x + a2*x^2 + a3*x^3 ..., obtain x = A_1*y + A_2*y**2 + A_3*y**3

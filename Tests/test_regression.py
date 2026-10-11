@@ -52,7 +52,10 @@ CONFIGS = {
 	'precessing_circular': base_params(mass1=21.0, mass2=4.5, eccentricity=0.0, spin1x=0.4, spin1y=0.2, spin1z=0.3, spin2x=-0.2, spin2y=0.1, spin2z=0.1),
 	'precessing_eccentric': base_params(mass1=22.0, mass2=4.0, eccentricity=0.2, spin1x=0.3, spin1y=0.1, spin1z=0.4, spin2x=-0.2, spin2y=0.15, spin2z=0.1),
 	'tidal'              : base_params(mass1=1.6, mass2=1.4, eccentricity=0.1, spin1z=0.02, spin2z=0.01,
-	                            Lambda2_1=400.0, Lambda2_2=600.0, pn_tidal_order=12, horizon_absorption=False),
+	                            Lambda2_1=400.0, Lambda2_2=600.0, pn_tidal_order=15, horizon_absorption=False, NS_quasi_universal_relations=False),
+	#same binary with the default NS_quasi_universal_relations=True, so q, o, Lambda3 and Sigma2 are filled from Lambda2
+	'tidal_quasi_universal': base_params(mass1=1.6, mass2=1.4, eccentricity=0.1, spin1z=0.02, spin2z=0.01,
+	                            Lambda2_1=400.0, Lambda2_2=600.0, pn_tidal_order=15, horizon_absorption=False),
 	#configurations with a reference frequency different from the starting frequency, exercising
 	#the backward-stitched (f22_ref>f22_start) and pre-evolved (f22_ref<f22_start) solution paths
 	'precessing_eccentric_f22_ref_above': base_params(mass1=22.0, mass2=4.0, eccentricity=0.2, spin1x=0.3, spin1y=0.1, spin1z=0.4, spin2x=-0.2, spin2y=0.15, spin2z=0.1, f22_ref=40.0),

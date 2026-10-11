@@ -30,7 +30,6 @@ class WignerD:
 		self._sin_beta = None   # [n]
 		self._exp_a = None      # [2max_l+1, n]  exp(-i m' a), row = m'+max_l
 		self._exp_g = None      # [max_l, n]     exp(-i k  g), row k-1 (k = 1..max_l)
-		self._n = 0
 
 	# Method to compute the constant coefficients that appear in P^l_{m'm}(cos b) polynomial
 	def _build(self, l, m):
@@ -62,15 +61,18 @@ class WignerD:
 		self._delta[(l, m)] = delta
 
 	# Method to update the Euler angles used to compute the Wigner matrix
-	def update_angles(self, alpha, cos_beta, gamma):
+	def update_angles(self, alpha, cos_beta, gamma, sin_beta=None):
 		alpha = np.atleast_1d(np.asarray(alpha, dtype=float))
 		cos_beta = np.atleast_1d(np.asarray(cos_beta, dtype=float))
 		gamma = np.atleast_1d(np.asarray(gamma, dtype=float))
 		alpha, cos_beta, gamma = np.broadcast_arrays(alpha, cos_beta, gamma)
 		L, n = self.max_l, cos_beta.shape[0]
-		self._n = n
 
-		self._sin_beta = np.sqrt(np.clip(1.0 - cos_beta ** 2, 0.0, None))
+		# sin(b) from cos(b) unless it is given, which keeps its precision when cos(b) is within roundoff of +-1
+		if sin_beta is None:
+			self._sin_beta = np.sqrt(np.maximum(1.0 - cos_beta ** 2, 0.0))
+		else:
+			self._sin_beta = np.broadcast_to(np.atleast_1d(np.asarray(sin_beta, dtype=float)), cos_beta.shape)
 
 		# powers of cos(b): [cos^0, cos^1, ..., cos^L] via cumprod -> [L+1, n]
 		cospow = np.empty((L + 1, n))
@@ -87,6 +89,10 @@ class WignerD:
 		# gamma: store exp(-i m g) for m = 1..L (negative m handled by conj on use)
 		zg = np.cos(gamma) - 1j * np.sin(gamma)
 		self._exp_g = np.cumprod(np.broadcast_to(zg, (L, n)), axis=0)
+
+	# Method to release the angle buffers. Any subsequent call to D() requires a new call to update_angles()
+	def clear_angles(self, ):
+		self._cospow, self._sin_beta, self._exp_a, self._exp_g = None, None, None, None
 
 	# Method to compute the Wigner D-matrix
 	def D(self, l, m, indxs=None):
@@ -118,11 +124,12 @@ class WignerD:
 
 #function to compute the spin weighted spherical harmonics with spin -2. From Eq.(F6) of 2502.03929:
 #_{-2}Y_{l,m} = (-1)^m \sqrt{\frac{2 l + 1}{4 \pi}} D^l_{-m,-2}(\phi, \theta, 0) = \sqrt{\frac{2 l + 1}{4 \pi}} e^{i m \phi} d^l_{m,2}(\theta)
-def compute_m2_Ylm(cos_theta, phi, l_array=[2, 3, 4]):
+def compute_m2_Ylm(cos_theta, phi, l_array=[2, 3, 4], sin_theta=None):
 
 	#Initialize Wigner matrices that correspond to requested spherical harmonics
 	W = WignerD([[l, 2] for l in l_array])
-	W.update_angles(-np.asarray(phi, dtype=float), cos_theta, 0.0)
+	#sin_theta is optional, and only matters for its precision when cos_theta is within roundoff of +-1
+	W.update_angles(-np.asarray(phi, dtype=float), cos_theta, 0.0, sin_beta=sin_theta)
 
 	#apply the correct normalization
 	m2_Ylm = [np.sqrt((2 * l + 1) / (4 * np.pi)) * W.D(l, 2) for l in l_array]
